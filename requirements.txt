@@ -1,0 +1,14 @@
+Django>=4.2,<5.0
+djangorestframework>=3.14,<4.0
+python-dotenv>=1.0.1
+gunicorn>=22.0.0
+
+# OCR support for photographed receipts (HEIC/JPG/PNG/WEBP) — the one
+# deliberate exception to this project's "no third-party packages" rule.
+# PDFs and the rest of the pipeline stay pure stdlib without these.
+# Also requires the separate Tesseract OCR *engine* (not a Python
+# package) — install with:
+#   winget install --id UB-Mannheim.TesseractOCR
+Pillow>=10.0.0
+pillow-heif>=0.15.0
+pytesseract>=0.3.10
