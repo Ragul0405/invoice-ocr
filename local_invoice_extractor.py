@@ -707,7 +707,7 @@ KNOWN_BRANDS = [
     "Fitbit", "Google", "Microsoft", "Electrolux", "Fisher & Paykel",
     "Breville", "KitchenAid", "Toshiba", "Hisense", "TCL", "JBL", "Bose",
     "Nikon", "Canon", "GoPro", "Dyson", "Philips", "Sharp", "Haier",
-    "Maytronics",
+    "Maytronics", "Omron",
 ]
 
 # Column-header words that can end up looking like a valid "product name"
@@ -994,6 +994,49 @@ def _find_model_number(text, warnings):
     return None
 
 
+# A loosely-matched "amount-shaped" token — digits with an integer part of
+# any length, then a mandatory decimal separator, then a 2-digit decimal
+# part — tolerant of OCR noise that a clean PDF text layer never produces:
+# 'O'/'o'/'I'/'l' typed for '0'/'0'/'1'/'1' (classic OCR digit lookalikes),
+# a comma used as the decimal separator instead of a period (both appear
+# on real receipts depending on locale/printer), and stray whitespace an
+# OCR pass sometimes inserts around the separator itself (e.g. photographed
+# receipt text read as "8205 , O0" for what a human reads as "$82.05" —
+# EasyOCR's known glued-currency-symbol misread). All of that noise is
+# resolved by _normalize_amount_token() below; this regex only needs to
+# recognize the *shape*.
+_AMOUNT_TOKEN = r"[\dOolI][\dOolI,\s]*[.,]\s*[\dOolI]{2}"
+
+_OCR_DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1"})
+
+
+def _normalize_amount_token(raw: str):
+    """Turn a loosely-matched _AMOUNT_TOKEN capture into a float, or None
+    if it doesn't resolve to a plausible amount. Only ever called on text
+    a regex has already confirmed is digit/separator/whitespace-shaped
+    ending in a 2-digit decimal part, so blanket 'O'/'l' -> '0'/'1'
+    substitution can't misfire on ordinary words — it's scoped to numbers
+    already recognized as amount-shaped, not applied to text generally.
+    The LAST '.' or ',' in the token is taken as the decimal separator
+    (whichever punctuation mark that is); every earlier '.'/',' is treated
+    as thousands-grouping noise and dropped, rather than trusted to
+    reconstruct the original grouping — the exact grouping doesn't matter
+    once the decimal point's position is known."""
+    token = raw.translate(_OCR_DIGIT_FIX)
+    token = re.sub(r"\s+", "", token)
+    sep_pos = max(token.rfind("."), token.rfind(","))
+    if sep_pos == -1:
+        return None
+    integer_part = re.sub(r"[.,]", "", token[:sep_pos])
+    decimal_part = token[sep_pos + 1 :]
+    if not integer_part.isdigit() or len(decimal_part) != 2 or not decimal_part.isdigit():
+        return None
+    try:
+        return float(f"{integer_part}.{decimal_part}")
+    except ValueError:
+        return None
+
+
 # Matches a "total" (but not "subtotal"/"sub total") label followed, on the
 # SAME line, by a $ amount — this catches the common case where a label
 # and its value are drawn as one text run (e.g. "TOTAL PRICE   $  1937.00",
@@ -1003,7 +1046,7 @@ def _find_model_number(text, warnings):
 # the max-amount fallback's docstring below for the concrete case this
 # protects against).
 _SAME_LINE_TOTAL_RE = re.compile(
-    r"(?<!sub)(?<!sub )\btotal\b[^\n$]{0,20}\$\s*([\d,]+\.\d{2})", re.IGNORECASE
+    rf"(?<!sub)(?<!sub )\btotal\b[^\n$]{{0,20}}\$\s*({_AMOUNT_TOKEN})", re.IGNORECASE
 )
 
 # Second strategy, for invoices where the label and its value are drawn as
@@ -1023,7 +1066,7 @@ _SAME_LINE_TOTAL_RE = re.compile(
 # label) safely falls through to the fallback below unchanged.
 _LABEL_ONLY_TOTAL_RE = re.compile(r"^\s*total\s*:?\s*$", re.IGNORECASE)
 _LABEL_ONLY_SUBTOTAL_RE = re.compile(r"^\s*sub\s*[- ]?\s*total\b", re.IGNORECASE)
-_PURE_AMOUNT_LINE_RE = re.compile(r"^\s*-?\s*\$\s*([\d,]+\.\d{2})\s*$")
+_PURE_AMOUNT_LINE_RE = re.compile(rf"^\s*-?\s*\$\s*({_AMOUNT_TOKEN})\s*$")
 _SOLITARY_MINUS_RE = re.compile(r"^\s*-\s*$")
 
 
@@ -1039,10 +1082,9 @@ def _find_next_line_total(text):
         if j < len(lines):
             m = _PURE_AMOUNT_LINE_RE.match(lines[j])
             if m:
-                try:
-                    found = float(m.group(1).replace(",", ""))
-                except ValueError:
-                    pass
+                amount = _normalize_amount_token(m.group(1))
+                if amount is not None:
+                    found = amount
     # Last match wins: a discount/tax breakdown's own "total"-ish rows (if
     # any) appear before the final grand total in reading order.
     return found
@@ -1051,15 +1093,13 @@ def _find_next_line_total(text):
 def _find_purchase_amount(text, warnings):
     same_line = _SAME_LINE_TOTAL_RE.findall(text)
     if same_line:
-        try:
-            amount = float(same_line[-1].replace(",", ""))
+        amount = _normalize_amount_token(same_line[-1])
+        if amount is not None:
             warnings.append(
                 f"purchase_amount: taken from the amount immediately following "
                 f"a 'total' label on the same line ({amount})."
             )
             return amount
-        except ValueError:
-            pass
 
     next_line_total = _find_next_line_total(text)
     if next_line_total is not None:
@@ -1077,11 +1117,10 @@ def _find_purchase_amount(text, warnings):
     # legitimately is the largest number printed, and no explicit total
     # label was found paired with its value.
     amounts = []
-    for m in re.finditer(r"\$\s*(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})", text):
-        try:
-            amounts.append(float(m.group(1).replace(",", "")))
-        except ValueError:
-            continue
+    for m in re.finditer(rf"\$\s*({_AMOUNT_TOKEN})", text):
+        amount = _normalize_amount_token(m.group(1))
+        if amount is not None:
+            amounts.append(amount)
     if not amounts:
         warnings.append("purchase_amount: no $-prefixed amount found in the document.")
         return None

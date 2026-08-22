@@ -6,9 +6,11 @@ gunicorn>=22.0.0
 # OCR support for photographed receipts (HEIC/JPG/PNG/WEBP) — the one
 # deliberate exception to this project's "no third-party packages" rule.
 # PDFs and the rest of the pipeline stay pure stdlib without these.
-# Also requires the separate Tesseract OCR *engine* (not a Python
-# package) — install with:
-#   winget install --id UB-Mannheim.TesseractOCR
+# OCR runs fully locally via EasyOCR — no system-level engine binary to
+# install (unlike Tesseract) and no cloud account/API key (unlike AWS
+# Textract). First run downloads ~65MB of model weights to a local cache
+# (~/.EasyOCR); every call after that is fully offline. See
+# image_ocr.OCR_INSTALL_HELP.
 Pillow>=10.0.0
 pillow-heif>=0.15.0
-pytesseract>=0.3.10
+easyocr>=1.7.0

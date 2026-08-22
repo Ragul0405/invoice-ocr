@@ -36,11 +36,12 @@ class ExtractInvoiceView(APIView):
     POST /api/v1/invoices/extract/
 
     Open endpoint — no authentication required. Fully offline: no cloud
-    API call, no API key. PDFs are read directly (local_invoice_extractor.py,
-    pure stdlib). Photos (HEIC/JPG/PNG/WEBP) are read via local OCR
-    (image_ocr.py — the one part of this project that uses third-party
-    packages: Pillow, pillow-heif, and the Tesseract OCR engine) and then
-    fed through the exact same field-extraction rules as PDF text.
+    API call, no API key. PDFs are read directly
+    (local_invoice_extractor.py, pure stdlib). Photos (HEIC/JPG/PNG/WEBP)
+    are read via local OCR (image_ocr.py — the one part of this project
+    that uses third-party packages: Pillow, pillow-heif, and the EasyOCR
+    engine) and then fed through the exact same field-extraction rules as
+    PDF text.
 
     multipart/form-data with a single field `invoice`.
 

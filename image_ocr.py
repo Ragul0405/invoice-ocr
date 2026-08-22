@@ -12,12 +12,22 @@ Dependencies (installed in the project venv):
     pillow        - general image decoding (JPG/PNG/WEBP) + the base
                     Image type pillow-heif plugs into
     pillow-heif   - adds .heic/.heif decoding support to Pillow
-    pytesseract   - Python wrapper that shells out to the Tesseract OCR
-                    engine binary
+    easyocr       - self-contained OCR engine (bundles its own text
+                    detection/recognition models — no separate system
+                    binary, no cloud account, no API key)
 
-Tesseract itself is a separate system-level program, NOT a Python
-package — pytesseract just calls it as a subprocess. It must be
-installed independently; see TESSERACT_INSTALL_HELP below.
+OCR runs fully locally via EasyOCR — no Tesseract-style system binary to
+install (that was the original deployment problem: a separately installed
+native program, off PATH by default, different per OS), and no cloud
+service/AWS account either (no credentials to provision, no per-request
+network dependency, no bill). The one thing EasyOCR needs that isn't
+fully "offline": the first time it runs on a machine, it downloads its
+recognition model weights (~65MB) to a local cache directory
+(~/.EasyOCR by default) — after that first download, every OCR call is
+local CPU inference with no network involved at all. To pre-populate
+that cache during deployment instead of on first request, run once
+during your build/setup step:
+    python -c "import easyocr; easyocr.Reader(['en'])"
 
 Output feeds into the exact same text-based field-extraction pipeline
 used for PDFs (local_invoice_extractor.extract_fields) — OCR's only job
@@ -27,18 +37,16 @@ already provides.
 
 import io
 import logging
-import os
-import shutil
 
 logger = logging.getLogger("image_ocr")
 
-TESSERACT_INSTALL_HELP = (
-    "OCR requires the Tesseract engine, which is a separate program (not "
-    "a Python package). Install it with:\n"
-    "  winget install --id UB-Mannheim.TesseractOCR\n"
-    "(run from an elevated/Administrator terminal), then restart this "
-    "server. Or download the installer directly from "
-    "https://github.com/UB-Mannheim/tesseract/wiki"
+OCR_INSTALL_HELP = (
+    "OCR requires the easyocr package (and its dependencies, including "
+    "PyTorch). Install it with:\n"
+    "  pip install easyocr\n"
+    "The first OCR call after installing will download ~65MB of model "
+    "weights to a local cache (~/.EasyOCR) — that needs one-time internet "
+    "access; every call after that runs fully offline."
 )
 
 SUPPORTED_IMAGE_TYPES = {
@@ -61,7 +69,13 @@ class OcrError(Exception):
             self.code = code
 
 
-class TesseractNotInstalledError(OcrError):
+class OcrEngineNotInstalledError(OcrError):
+    """Raised when easyocr (or a dependency, e.g. torch) isn't installed.
+    Kept as code 'ocr_engine_not_installed' — callers (the Django view and
+    standalone_api.py) key off that exact string to return HTTP 503
+    instead of 422, the same behavior as the old
+    TesseractNotInstalledError this replaces."""
+
     code = "ocr_engine_not_installed"
 
 
@@ -70,6 +84,7 @@ class ImageDecodeError(OcrError):
 
 
 _heif_registered = False
+_reader = None
 
 
 def _ensure_heif_support():
@@ -82,31 +97,31 @@ def _ensure_heif_support():
     _heif_registered = True
 
 
-def _find_tesseract_binary():
-    """Locate the Tesseract executable. pytesseract defaults to expecting
-    it on PATH; on Windows it's commonly installed outside PATH, so also
-    check the standard install locations before giving up."""
-    on_path = shutil.which("tesseract")
-    if on_path:
-        return on_path
-    candidates = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
-    ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    return None
+def _get_reader():
+    """Lazily create (and cache) the EasyOCR Reader — it loads model
+    weights into memory, which is too expensive to redo per request."""
+    global _reader
+    if _reader is not None:
+        return _reader
+
+    try:
+        import easyocr
+    except ImportError as exc:
+        raise OcrEngineNotInstalledError(OCR_INSTALL_HELP) from exc
+
+    try:
+        _reader = easyocr.Reader(["en"], gpu=False)
+    except Exception as exc:  # noqa: BLE001 - e.g. no internet for first-run model download
+        raise OcrEngineNotInstalledError(
+            f"Could not initialize the EasyOCR engine: {exc}\n\n{OCR_INSTALL_HELP}"
+        ) from exc
+    return _reader
 
 
-def extract_text_from_image(file_bytes: bytes, content_type: str) -> str:
-    """OCR an image (HEIC/JPG/PNG/WEBP) into plain text. Raises an
-    OcrError subclass on failure; never returns garbage silently."""
-    kind = SUPPORTED_IMAGE_TYPES.get((content_type or "").lower())
-    if kind is None:
-        raise ImageDecodeError(f"Unsupported image type for OCR: '{content_type}'.")
-
+def _decode_to_image_array(file_bytes: bytes, kind: str):
+    """Decode the uploaded image (HEIC/JPG/PNG/WEBP) with Pillow into an
+    RGB numpy array — EasyOCR's reader accepts either a file path or a
+    numpy array directly."""
     if kind == "heic":
         try:
             _ensure_heif_support()
@@ -114,35 +129,37 @@ def extract_text_from_image(file_bytes: bytes, content_type: str) -> str:
             raise ImageDecodeError(f"Could not load HEIC decoder: {exc}") from exc
 
     from PIL import Image
+    import numpy as np
 
     try:
         image = Image.open(io.BytesIO(file_bytes))
         image.load()
-        # pytesseract inspects PIL's `.format` tag to decide how to hand
-        # the image to the Tesseract subprocess, and doesn't recognize
-        # "HEIF" (what pillow-heif tags a decoded HEIC/HEIF image with)
-        # even though the underlying pixel data is perfectly normal RGB —
-        # it fails with a bare "Unsupported image format/type" TypeError.
-        # .convert("RGB") produces a fresh Image with format=None, which
-        # sidesteps that check entirely; also normalizes away any alpha
-        # channel, which OCR doesn't need anyway.
         image = image.convert("RGB")
     except Exception as exc:  # noqa: BLE001
         raise ImageDecodeError(f"Could not decode image file: {exc}") from exc
 
-    tesseract_path = _find_tesseract_binary()
-    if tesseract_path is None:
-        raise TesseractNotInstalledError(TESSERACT_INSTALL_HELP)
+    return np.array(image)
 
-    import pytesseract
 
-    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+def extract_text_from_image(file_bytes: bytes, content_type: str) -> str:
+    """OCR an image (HEIC/JPG/PNG/WEBP) into plain text via a local
+    EasyOCR engine. Raises an OcrError subclass on failure; never returns
+    garbage silently."""
+    kind = SUPPORTED_IMAGE_TYPES.get((content_type or "").lower())
+    if kind is None:
+        raise ImageDecodeError(f"Unsupported image type for OCR: '{content_type}'.")
+
+    image_array = _decode_to_image_array(file_bytes, kind)
+    reader = _get_reader()
 
     try:
-        text = pytesseract.image_to_string(image)
-    except pytesseract.TesseractNotFoundError as exc:
-        raise TesseractNotInstalledError(TESSERACT_INSTALL_HELP) from exc
+        # paragraph=False (the default) keeps each detected text line as its
+        # own list entry — local_invoice_extractor.py's field-extraction
+        # heuristics (e.g. _find_next_line_total, _find_product_code_pair)
+        # depend on real line breaks between adjacent fields, which
+        # paragraph=True would merge away into single space-joined blobs.
+        lines = reader.readtext(image_array, detail=0)
     except Exception as exc:  # noqa: BLE001
         raise OcrError(f"OCR failed: {exc}") from exc
 
-    return text.strip()
+    return "\n".join(lines).strip()

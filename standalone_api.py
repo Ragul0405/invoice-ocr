@@ -2,17 +2,16 @@
 Invoice Warranty Extraction API — pure standard library server, plus one
 scoped exception for photos.
 
-No AI/cloud API, no API key, ever. PDFs are read by a from-scratch text
-reader (local_invoice_extractor.py) — pure stdlib, no third-party
-packages. Photos (HEIC/JPG/PNG/WEBP) are read via local OCR (image_ocr.py)
-— the ONE part of this project that uses third-party packages (Pillow,
-pillow-heif) plus the separately-installed Tesseract OCR engine, because
-there is no way to decode a camera image format or recognize text in a
-photo using only the Python standard library. Requires
-`pip install pillow pillow-heif pytesseract` and Tesseract itself
-installed on the machine (see image_ocr.TESSERACT_INSTALL_HELP) — the
-server still starts and PDF extraction still works with none of that
-present; only image uploads need it.
+PDFs are read by a from-scratch text reader (local_invoice_extractor.py)
+— pure stdlib, no third-party packages, no cloud calls. Photos
+(HEIC/JPG/PNG/WEBP) are read via image_ocr.py — the ONE part of this
+project that uses third-party packages (Pillow, pillow-heif, easyocr),
+because there is no way to decode a camera image format or recognize
+text in a photo using only the Python standard library. OCR itself runs
+fully locally (no cloud account, no API key) via EasyOCR — see
+image_ocr.OCR_INSTALL_HELP. Requires `pip install pillow pillow-heif
+easyocr` — the server still starts and PDF extraction still works with
+none of that present; only image uploads need it.
 
 Usage:
     python standalone_api.py
@@ -182,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
             if image_ocr is None:
                 self._send_json(503, extractor.build_error_response(
                     "OCR support isn't installed on this server. Run: "
-                    "pip install pillow pillow-heif pytesseract"
+                    "pip install pillow pillow-heif easyocr"
                 ))
                 return
             try:
@@ -214,7 +213,7 @@ def main():
         logger.warning(
             "OCR packages not installed — PDF uploads work, but "
             "HEIC/JPG/PNG/WEBP uploads will return 503. Run: "
-            "pip install pillow pillow-heif pytesseract"
+            "pip install pillow pillow-heif easyocr"
         )
     logger.info("  GET  /api/v1/health/")
     logger.info("  POST /api/v1/invoices/extract/  (multipart field: invoice; PDF, or HEIC/JPG/PNG/WEBP via OCR)")
