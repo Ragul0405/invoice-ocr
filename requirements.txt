@@ -11,6 +11,13 @@ gunicorn>=22.0.0
 # Textract). First run downloads ~65MB of model weights to a local cache
 # (~/.EasyOCR); every call after that is fully offline. See
 # image_ocr.OCR_INSTALL_HELP.
+#
+# For deployment, use deploy_setup.sh instead of installing this file
+# directly — easyocr pulls in torch, whose wheel ships several hundred
+# MB to several GB of build-only artifacts (static-link .lib/.a stubs,
+# C++ headers) that are dead weight for plain CPU inference. That script
+# installs a CPU-only torch build and then runs
+# scripts/cleanup_torch_bloat.py to strip that dead weight.
 Pillow>=10.0.0
 pillow-heif>=0.15.0
 easyocr>=1.7.0
