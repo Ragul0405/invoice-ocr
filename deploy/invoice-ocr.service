@@ -1,0 +1,21 @@
+[Unit]
+Description=Invoice OCR Django app (gunicorn)
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/app
+Environment=PATH=/home/ec2-user/app/venv/bin
+# --workers 1 is deliberate, not a placeholder: each gunicorn worker
+# process loads its OWN independent copy of torch + EasyOCR's models
+# (they're not shared/forked from a common preloaded state). On a
+# t3.small (2GB RAM), running 2 workers OOM-killed mid-request during a
+# real deploy (see deploy/README.md). If you size up to an instance with
+# more RAM (t3.medium/4GB+), raising this is safe and gives real request
+# concurrency — just confirm headroom first (each worker needs 500MB-1GB+
+# once its EasyOCR reader is loaded).
+ExecStart=/home/ec2-user/app/venv/bin/gunicorn invoice_ai.wsgi:application --bind 127.0.0.1:8000 --workers 1 --timeout 120
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
